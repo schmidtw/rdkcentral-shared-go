@@ -249,6 +249,14 @@ on:
         required: false
         type: boolean
         default: false
+      tests-coverage-threshold:
+        description: |
+          The minimum total test coverage percentage (0-100) required.  The
+          unit tests fail if coverage is lower.  Set to 0 to report coverage
+          without enforcing a minimum.
+        required: false
+        type: number
+        default: 80
 
       # Artifact uploading focused
       upload-skip:
@@ -368,12 +376,12 @@ jobs:
           name: coverage
           path: ${{ inputs.working-directory }}/coverage.txt
 
-      - name: Send results to codecov.io
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+      - name: Check test coverage
+        uses: vladopajic/go-test-coverage@6890500b00a7e5862e54662c04ea9fa7c799ce1e # v2.23.0
         with:
-          directory: ${{ inputs.working-directory }}
-          flags:     unittests
-          token:     ${{ secrets.CODECOV_TOKEN }}
+          profile:         ${{ inputs.working-directory }}/coverage.txt
+          source-dir:      ${{ inputs.working-directory }}
+          threshold-total: ${{ inputs.tests-coverage-threshold }}
 
 
   docker_check:
