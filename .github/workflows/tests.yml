@@ -24,7 +24,7 @@ on:
 
 permissions:
   contents:      write
-  pull-requests: read
+  pull-requests: write
   packages:      write
 
 jobs:
@@ -154,6 +154,7 @@ jobs:
       release-project-name: program
       release-skip-publish: --skip-publish
       upload-skip:          true
+      tests-post-comment: false
       yaml-lint-skip:       false
     secrets: inherit
 
@@ -167,6 +168,7 @@ jobs:
       release-project-name: library
       release-skip-publish: --skip-publish
       upload-skip:          true
+      tests-post-comment: false
     secrets: inherit
 
   tag:
@@ -177,8 +179,14 @@ jobs:
       - slow-things
       - slow-things-library
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions:  write
+    # Dependabot's pull_request token is read-only, so it can't push a tag or
+    # dispatch a workflow.  Dependency bumps don't need the release path tested.
     if: |
       always() &&
+      github.actor != 'dependabot[bot]' &&
       startsWith(github.ref, 'refs/tags/') == false &&
       needs.command.result                 != 'failure' &&
       needs.program.result                 != 'failure' &&
@@ -188,15 +196,18 @@ jobs:
     steps:
       - name: Checkout the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          token: ${{ secrets.PUSH_TAG_TOKEN }}
 
+      # Tags pushed with github.token don't trigger workflows, so dispatch
+      # this workflow on the new tag explicitly.
       - name: Tag for testing the release
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          patch=`date +%s`
-          git tag "v1.0.${patch}"
-          git push --tags
+          tag="v1.0.$(date +%s)"
+          git tag "$tag"
+          git push origin "$tag"
+          gh workflow run tests.yml --ref "$tag"
 
   done:
     needs: [ command-tag, program-tag, library-tag ]
