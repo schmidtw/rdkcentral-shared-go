@@ -2,29 +2,6 @@
 # SPDX-FileCopyrightText: 2022 Weston Schmidt <weston_schmidt@alumni.purdue.edu>
 # SPDX-License-Identifier: Apache-2.0
 # Copied from github.com/goschtalt/.github
-# @example=## Golang CI Workflow Sample
-## SPDX-FileCopyrightText: 2023 Comcast Cable Communications Management, LLC
-## SPDX-License-Identifier: Apache-2.0
-#---
-#name: 'CI'
-#
-#on:
-#  push:
-#    branches:
-#      - main
-#    paths-ignore:
-#      - README.md
-#    tags:
-#      - 'v[0-9]+.[0-9]+.[0-9]+'
-#  pull_request:
-#  workflow_dispatch:
-#
-#jobs:
-#  ci:
-#    uses: xmidt-org/shared-go/.github/workflows/ci.yml@6a0bec30f42c318c0c1d06705f3f60911ed7c610 # v3.2.0
-#    with:
-#      release-type: program    # or: library
-#    secrets: inherit
 ---
 name: 'CI Workflow'
 
@@ -101,7 +78,7 @@ on:
         type: string
         default: '5m'
       lint-version:
-        description: 'The working directory for this project.'
+        description: "The golangci-lint version to use."
         required: false
         type: string
         default: 'latest'
@@ -192,7 +169,7 @@ on:
         default: '.'
 
       release-notify-skip:
-        description: "Skip notifying the platform repos of a new release.  Notification is already skipped when release-type is `library`."
+        description: "Deprecated: has no effect.  Release notification of platform repos was removed."
         required: false
         type: boolean
         default: false
@@ -272,6 +249,23 @@ on:
         required: false
         type: boolean
         default: false
+      tests-min-threshold:
+        description: |
+          The minimum total test coverage percentage (0-100) required.  The
+          unit tests fail if coverage is lower.  Set to 0 to report coverage
+          without enforcing a minimum.
+        required: false
+        type: number
+        default: 80
+      tests-post-comment:
+        description: |
+          If set to true (default), post (and keep updated) a coverage report
+          comment on the pull request.  Comments are never posted for pull
+          requests from forks or from dependabot, because their token is
+          read-only.
+        required: false
+        type: boolean
+        default: true
 
       # Artifact uploading focused
       upload-skip:
@@ -337,6 +331,9 @@ jobs:
     if: inputs.tests-skip == false
     permissions:
       contents: read
+    outputs:
+      coverage_total:  ${{ steps.summary.outputs.total }}
+      coverage_report: ${{ steps.summary.outputs.report }}
     steps:
       - name: Checkout the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -391,13 +388,132 @@ jobs:
           name: coverage
           path: ${{ inputs.working-directory }}/coverage.txt
 
-      - name: Send results to codecov.io
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
-        with:
-          directory: ${{ inputs.working-directory }}
-          flags:     unittests
-          token:     ${{ secrets.CODECOV_TOKEN }}
+      # Summarize coverage in the job summary, an annotation and (for the
+      # optional PR comment) a job output.  This never fails the job; the
+      # threshold is enforced by the next step so this runs either way.
+      - name: Summarize test coverage
+        id: summary
+        if: always() && hashFiles(format('{0}/coverage.txt', inputs.working-directory)) != ''
+        working-directory: ${{ inputs.working-directory }}
+        shell: bash
+        env:
+          THRESHOLD: ${{ inputs.tests-min-threshold }}
+          WORKDIR:   ${{ inputs.working-directory }}
+        run: |
+          # coverage.txt lines: <file>:<start>,<end> <statements> <count>
+          awk -v threshold="$THRESHOLD" '
+            NR == 1 && /^mode:/ { next }
+            {
+              n = split($1, parts, ":")
+              file = parts[1]
+              sub(/\/[^\/]*$/, "", file)
+              stmts[file] += $2
+              all += $2
+              if ($3 > 0) { hit[file] += $2; hits += $2 }
+            }
+            END {
+              total = (all > 0) ? 100 * hits / all : 0
+              ok = (total >= threshold)
+              printf "total=%.1f\nok=%s\n", total, ok ? "true" : "false" > "totals.env"
+              for (f in stmts) {
+                printf "%.1f\t%d\t%s\n", 100 * hit[f] / stmts[f], stmts[f], f > "packages.tsv"
+              }
+            }' coverage.txt
+          sort -n packages.tsv -o packages.tsv
 
+          total=$(sed -n 's/^total=//p' totals.env)
+          ok=$(sed -n 's/^ok=//p' totals.env)
+          if [ "$ok" = "true" ]; then icon="✅"; else icon="❌"; fi
+          if [ "$THRESHOLD" = "0" ]; then
+            minimum="no minimum"
+          else
+            minimum="minimum ${THRESHOLD}%"
+          fi
+
+          # The marker is per working directory so each module in a repo gets
+          # its own (updated, not duplicated) PR comment.
+          where=""
+          if [ "$WORKDIR" != "." ]; then where=" for \`${WORKDIR}\`"; fi
+
+          {
+            echo "<!-- shared-go-coverage:${WORKDIR} -->"
+            echo "### ${icon} Test coverage${where}: ${total}% (${minimum})"
+            echo
+            echo "<details><summary>Coverage by package (lowest first)</summary>"
+            echo
+            echo "| Package | Coverage | Statements |"
+            echo "| :--- | ---: | ---: |"
+            while IFS=$'\t' read -r pct stmts pkg; do
+              echo "| \`${pkg}\` | ${pct}% | ${stmts} |"
+            done < packages.tsv
+            echo
+            echo "</details>"
+          } > report.md
+
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$ok" = "true" ]; then
+            echo "::notice title=Test coverage::${total}% (${minimum})"
+          else
+            echo "::error title=Test coverage::${total}% is below the ${THRESHOLD}% minimum"
+          fi
+
+          {
+            echo "total=${total}"
+            delim="EOF_$(date +%s%N)"
+            echo "report<<${delim}"
+            cat report.md
+            echo "${delim}"
+          } >> "$GITHUB_OUTPUT"
+          rm -f totals.env packages.tsv report.md
+
+      - name: Check test coverage
+        uses: vladopajic/go-test-coverage@6890500b00a7e5862e54662c04ea9fa7c799ce1e # v2.23.0
+        with:
+          profile:         ${{ inputs.working-directory }}/coverage.txt
+          source-dir:      ${{ inputs.working-directory }}
+          threshold-total: ${{ inputs.tests-min-threshold }}
+
+
+  # Optional: post the coverage report on the pull request.  Callers must
+  # grant `pull-requests: write` to this workflow (even when they don't enable
+  # tests-post-comment) because a reusable workflow can't request more
+  # permission than its caller allows.
+  coverage_comment:
+    name: Coverage PR comment
+    needs: unit_test
+    runs-on: [ ubuntu-latest ]
+    permissions:
+      pull-requests: write
+    if: |
+      always() &&
+      inputs.tests-post-comment &&
+      needs.unit_test.outputs.coverage_report != '' &&
+      github.event_name == 'pull_request' &&
+      github.actor != 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Post or update the coverage comment
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REPORT:  ${{ needs.unit_test.outputs.coverage_report }}
+          WORKDIR: ${{ inputs.working-directory }}
+        with:
+          script: |
+            const marker = `<!-- shared-go-coverage:${process.env.WORKDIR} -->`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(
+              github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment(
+                { owner, repo, comment_id: existing.id, body: process.env.REPORT });
+            } else {
+              await github.rest.issues.createComment(
+                { owner, repo, issue_number, body: process.env.REPORT });
+            }
 
   docker_check:
     if: inputs.release-docker
@@ -1298,55 +1414,6 @@ jobs:
         shell: bash
         run: |
           rm -rf .secrets
-
-#  notify:
-#    needs: release
-#    # The platform repos react to a new application release.  A library has
-#    # nothing to deploy, so it is never announced; anything else can opt out.
-#    if: |
-#      needs.release.result == 'success' &&
-#      inputs.release-type != 'library' &&
-#      !inputs.release-notify-skip
-#    name: Release-notification-${{ matrix.platform_repo }}
-#    runs-on: [ubuntu-latest]
-#    permissions:
-#      contents: read
-#    strategy:
-#      matrix:
-#        platform_repo: [xmidt, webpa, nion, anemoi]
-#    env:
-#      PROJECT_NAME: ${{ needs.release.outputs.project_name }}
-#    steps:
-#      - name: Set release version
-#        id: set-version
-#        if: startsWith(github.ref_name, 'v')
-#        shell: bash
-#        run: |
-#          if [[ "${{ github.ref_name }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-#            export RELEASE=$(echo "${{ github.ref_name }}" | sed 's/^v//')
-#            echo "Stripped leading v from tag name."
-#            echo "Before: ${{ github.ref_name }}"
-#            echo "After: $RELEASE"
-#            echo "version=$RELEASE" >> $GITHUB_OUTPUT
-#            echo "valid=true" >> $GITHUB_OUTPUT
-#          else
-#            echo "Tag does not match expected version format (e.g., v1.2.3), skipping"
-#            echo "valid=false" >> $GITHUB_OUTPUT
-#          fi
-#
-#      - name: Notify Platform repo of new release
-#        if: steps.set-version.outputs.valid == 'true'
-#        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
-#        with:
-#          token: ${{ secrets.REPOSITORY_DISPATCH_TOKEN }}
-#          repository: comcast-cl/${{ matrix.platform_repo }}
-#          event-type: ${{ env.PROJECT_NAME }}-new-release
-#          client-payload: |
-#            {
-#              "app_name": "${{ env.PROJECT_NAME }}",
-#              "repository": "${{ github.repository }}",
-#              "version": "${{ steps.set-version.outputs.version }}"
-#            }
 
   all_passed:
     needs: [ build_program, unit_test, style, golint, license, copyright, release, ymllint ]
