@@ -15,8 +15,10 @@ jobs:
   release:
     permissions:
       contents: write
+      actions:  write   # lets the release job dispatch release-workflows.yml
     uses: ./.github/workflows/auto-releaser.yml
     with:
       tag-filter: '^(?!v1[.]).*$'
       release-ignore-paths: ""
+      release-workflow: release-workflows.yml
     secrets: inherit
