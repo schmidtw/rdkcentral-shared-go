@@ -2,29 +2,6 @@
 # SPDX-FileCopyrightText: 2022 Weston Schmidt <weston_schmidt@alumni.purdue.edu>
 # SPDX-License-Identifier: Apache-2.0
 # Copied from github.com/goschtalt/.github
-# @example=## Golang CI Workflow Sample
-## SPDX-FileCopyrightText: 2023 Comcast Cable Communications Management, LLC
-## SPDX-License-Identifier: Apache-2.0
-#---
-#name: 'CI'
-#
-#on:
-#  push:
-#    branches:
-#      - main
-#    paths-ignore:
-#      - README.md
-#    tags:
-#      - 'v[0-9]+.[0-9]+.[0-9]+'
-#  pull_request:
-#  workflow_dispatch:
-#
-#jobs:
-#  ci:
-#    uses: xmidt-org/shared-go/.github/workflows/ci.yml@6a0bec30f42c318c0c1d06705f3f60911ed7c610 # v3.2.0
-#    with:
-#      release-type: program    # or: library
-#    secrets: inherit
 ---
 name: 'CI Workflow'
 
@@ -101,7 +78,7 @@ on:
         type: string
         default: '5m'
       lint-version:
-        description: 'The working directory for this project.'
+        description: "The golangci-lint version to use."
         required: false
         type: string
         default: 'latest'
@@ -192,7 +169,7 @@ on:
         default: '.'
 
       release-notify-skip:
-        description: "Skip notifying the platform repos of a new release.  Notification is already skipped when release-type is `library`."
+        description: "Deprecated: has no effect.  Release notification of platform repos was removed."
         required: false
         type: boolean
         default: false
@@ -217,6 +194,17 @@ on:
 
       release-skip-publish:
         description: "Set to --skip-publish to skip publishing."
+        required: false
+        type: string
+        default: ''
+
+      release-simulate-tag:
+        description: |
+          Run the release as if this tag (e.g. `v1.0.0`) had been pushed,
+          without creating it on GitHub.  The tag exists only on the runner,
+          nothing is published, packages are signed with a throwaway key
+          instead of the real one, and the changelog is built from git.  Used
+          to test the release path on pull requests.
         required: false
         type: string
         default: ''
@@ -272,13 +260,15 @@ on:
         required: false
         type: boolean
         default: false
-
-      # Artifact uploading focused
-      upload-skip:
-        description: 'Skip uploading the artifacts.'
+      tests-min-threshold:
+        description: |
+          The minimum total test coverage percentage (0-100) required.  The
+          unit tests fail if coverage is lower.  Set to 0 to report coverage
+          without enforcing a minimum.  When left unset (-1), the total from
+          .testcoverage.yml is used if the repo has one, otherwise 80.
         required: false
-        type: boolean
-        default: false
+        type: number
+        default: -1
 
       # YML linting focused
       yaml-lint-skip:
@@ -337,6 +327,8 @@ jobs:
     if: inputs.tests-skip == false
     permissions:
       contents: read
+    outputs:
+      coverage_total:  ${{ steps.coverage.outputs.total-coverage }}
     steps:
       - name: Checkout the code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -373,30 +365,44 @@ jobs:
         shell: bash
         run: |
           go test -v ${{ inputs.tests-race && '-race' || '' }} -coverprofile=coverage.txt ./...
-          go test ${{ inputs.tests-race && '-race' || '' }} -json  ./... > report.json
 
-      # upload report as artifact
-      - name: Archive unit tests report
-        if: inputs.upload-skip == false
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: report
-          path: ${{ inputs.working-directory }}/report.json
+      # go-test-coverage only reads .testcoverage.yml when told to.  Use the
+      # repo's file if there is one (working directory first, then the repo
+      # root); otherwise fall back to the built-in 80% total minimum.  An
+      # explicit tests-min-threshold always wins.
+      - name: Find the coverage settings
+        id: coverage-settings
+        shell: bash
+        env:
+          WORKDIR:   ${{ inputs.working-directory }}
+          THRESHOLD: ${{ inputs.tests-min-threshold }}
+        run: |
+          config=""
+          for f in "${WORKDIR}/.testcoverage.yml" ".testcoverage.yml"; do
+            if [[ -f "$f" ]]; then config="$f"; break; fi
+          done
 
-      # upload coverage as artifact
-      - name: Archive code coverage results
-        if: inputs.upload-skip == false
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: coverage
-          path: ${{ inputs.working-directory }}/coverage.txt
+          threshold="$THRESHOLD"
+          if [[ "$threshold" == -* ]]; then
+            if [[ -n "$config" ]]; then
+              threshold=-1   # not passed; the file's total applies
+            else
+              threshold=80
+            fi
+          fi
 
-      - name: Send results to codecov.io
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+          echo "Coverage config: ${config:-none}, total minimum: ${threshold}"
+          echo "config=${config}"       >> "$GITHUB_OUTPUT"
+          echo "threshold=${threshold}" >> "$GITHUB_OUTPUT"
+
+      - name: Check test coverage
+        id: coverage
+        uses: vladopajic/go-test-coverage@6890500b00a7e5862e54662c04ea9fa7c799ce1e # v2.23.0
         with:
-          directory: ${{ inputs.working-directory }}
-          flags:     unittests
-          token:     ${{ secrets.CODECOV_TOKEN }}
+          config:          ${{ steps.coverage-settings.outputs.config }}
+          profile:         ${{ inputs.working-directory }}/coverage.txt
+          source-dir:      ${{ inputs.working-directory }}
+          threshold-total: ${{ steps.coverage-settings.outputs.threshold }}
 
 
   docker_check:
@@ -455,14 +461,6 @@ jobs:
             cat fmt.patch;
             exit 1;
           fi
-
-      - name: Archive code style results
-        if: inputs.upload-skip == false
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: fmt
-          path: ${{ inputs.working-directory }}/fmt.patch
-          retention-days: 10
 
 
   golint:
@@ -701,19 +699,7 @@ jobs:
 
       - name: Validate compliance
         run: |
-          licensed status -f yaml > licensing.yml || true
-          yq eval 'del(.apps[].sources[].dependencies[] | select(.allowed == "true") )' licensing.yml > disallowed.yml
           licensed status
-
-      - name: Archive license results
-        if: always() && inputs.upload-skip == false
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: licensing
-          path: |
-            ${{ inputs.working-directory }}/licensing.yml
-            ${{ inputs.working-directory }}/disallowed.yml
-          retention-days: 30
 
   release:
     permissions:
@@ -726,7 +712,7 @@ jobs:
     if: |
       always() &&
       inputs.release-skip        == false     &&
-      startsWith(github.ref, 'refs/tags/')    &&
+      (startsWith(github.ref, 'refs/tags/') || inputs.release-simulate-tag != '') &&
       needs.build_program.result != 'failure' &&
       needs.unit_test.result     != 'failure' &&
       needs.style.result         != 'failure' &&
@@ -794,7 +780,11 @@ jobs:
           fi
           gecho ""
           gecho "changelog:"
-          gecho "  use: github"
+          if [[ "${{ inputs.release-simulate-tag != '' }}" == "true" ]]; then
+            gecho "  use: git"
+          else
+            gecho "  use: github"
+          fi
           gecho "  sort: asc"
           gecho "  filters:"
           gecho "    exclude:"
@@ -936,7 +926,7 @@ jobs:
           gecho "      - ghcr.io/${{ github.repository }}:latest-amd64"
           fi
 
-          if [[ "${{ inputs.release-skip-publish }}" == "--skip-publish" ]]; then
+          if [[ "${{ inputs.release-skip-publish == '--skip-publish' || inputs.release-simulate-tag != '' }}" == "true" ]]; then
           gecho "    skip_push: true"
           fi
 
@@ -990,7 +980,7 @@ jobs:
           gecho "      - ghcr.io/${{ github.repository }}:latest-arm64"
           fi
 
-          if [[ "${{ inputs.release-skip-publish }}" == "--skip-publish" ]]; then
+          if [[ "${{ inputs.release-skip-publish == '--skip-publish' || inputs.release-simulate-tag != '' }}" == "true" ]]; then
           gecho "    skip_push: true"
           fi
 
@@ -1172,6 +1162,7 @@ jobs:
 
       - name: Handle the RPM signing keys
         if: |
+          inputs.release-simulate-tag == '' &&
           inputs.release-type == 'program' &&
           inputs.release-rpms == true
         working-directory: ${{ inputs.working-directory }}
@@ -1185,6 +1176,7 @@ jobs:
 
       - name: Handle the DEB signing keys
         if: |
+          inputs.release-simulate-tag == '' &&
           inputs.release-type == 'program' &&
           inputs.release-debs == true
         working-directory: ${{ inputs.working-directory }}
@@ -1195,6 +1187,34 @@ jobs:
 
           echo "${{ vars.RPM_GPG_PUBLIC_KEY }}"     > .extra_files/DEB-GPG-KEY-comcast-xmidt
           echo "${{ secrets.RPM_GPG_PRIVATE_KEY }}" > .secrets/deb_gpg_private_key_file
+
+      # Simulated releases never touch the real signing key (the steps above
+      # are skipped, and the key isn't available to fork or dependabot PRs
+      # anyway); sign with a throwaway key instead.
+      - name: Use a throwaway signing key for a simulated release
+        if: |
+          inputs.release-simulate-tag != '' &&
+          inputs.release-type == 'program' &&
+          (inputs.release-rpms == true || inputs.release-debs == true)
+        working-directory: ${{ inputs.working-directory }}
+        shell: bash
+        env:
+          RPMS: ${{ inputs.release-rpms }}
+          DEBS: ${{ inputs.release-debs }}
+        run: |
+          mkdir -p .extra_files .secrets
+          export GNUPGHOME="$(mktemp -d)"
+          gpg --batch --pinentry-mode loopback --passphrase simulated \
+            --quick-gen-key "Simulated Release <simulated@invalid>" rsa2048 sign never
+          kinds=()
+          [[ "$RPMS" == "true" ]] && kinds+=(rpm)
+          [[ "$DEBS" == "true" ]] && kinds+=(deb)
+          for kind in "${kinds[@]}"; do
+            gpg --batch --pinentry-mode loopback --passphrase simulated \
+              --armor --export-secret-keys > ".secrets/${kind}_gpg_private_key_file"
+            gpg --armor --export > ".extra_files/${kind^^}-GPG-KEY-comcast-xmidt"
+          done
+          rm -rf "$GNUPGHOME"
 
       - name: Generate the scripts & support files
         if: |
@@ -1262,7 +1282,9 @@ jobs:
 
       - name: Log in to GitHub Container Registry
         if: |
-          inputs.release-docker == true
+          inputs.release-docker       == true             &&
+          inputs.release-skip-publish != '--skip-publish' &&
+          inputs.release-simulate-tag == ''
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
@@ -1272,12 +1294,22 @@ jobs:
       - name: Update --skip-publish if needed
         shell: bash
         run: |
-          if [[ "${{ inputs.release-skip-publish }}" == "--skip-publish" ]]; then
+          if [[ "${{ inputs.release-skip-publish == '--skip-publish' || inputs.release-simulate-tag != '' }}" == "true" ]]; then
             echo "SKIP_PUBLISH=--skip=publish" >> $GITHUB_ENV
           fi
 
+      - name: Create the simulated tag on the runner
+        if: inputs.release-simulate-tag != ''
+        shell: bash
+        env:
+          TAG: ${{ inputs.release-simulate-tag }}
+        run: |
+          git tag "$TAG"
+
       - name: Generate the Release
-        if: success() && startsWith(github.ref, 'refs/tags/')
+        if: |
+          success() &&
+          (startsWith(github.ref, 'refs/tags/') || inputs.release-simulate-tag != '')
         uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           distribution: goreleaser
@@ -1285,12 +1317,12 @@ jobs:
           version:      '~> v2'
           args:         release --clean --skip=validate ${{ env.SKIP_PUBLISH }}
         env:
-          GORELEASER_CURRENT_TAG:         ${{ github.ref_name }}
+          GORELEASER_CURRENT_TAG:         ${{ inputs.release-simulate-tag || github.ref_name }}
           GITHUB_TOKEN:                   ${{ secrets.GITHUB_TOKEN }}
-          NFPM_PASSPHRASE:                ${{ secrets.RPM_GPG_PRIVATE_PASSWORD }}
-          NFPM_DEFAULT_PASSPHRASE:        ${{ secrets.RPM_GPG_PRIVATE_PASSWORD }}
-          NFPM_DEFAULT_RPM_PASSPHRASE:    ${{ secrets.RPM_GPG_PRIVATE_PASSWORD }}
-          NFPM_DEFAULT_DEB_PASSPHRASE:    ${{ secrets.RPM_GPG_PRIVATE_PASSWORD }}
+          NFPM_PASSPHRASE: ${{ inputs.release-simulate-tag != '' && 'simulated' || secrets.RPM_GPG_PRIVATE_PASSWORD }}
+          NFPM_DEFAULT_PASSPHRASE: ${{ inputs.release-simulate-tag != '' && 'simulated' || secrets.RPM_GPG_PRIVATE_PASSWORD }}
+          NFPM_DEFAULT_RPM_PASSPHRASE: ${{ inputs.release-simulate-tag != '' && 'simulated' || secrets.RPM_GPG_PRIVATE_PASSWORD }}
+          NFPM_DEFAULT_DEB_PASSPHRASE: ${{ inputs.release-simulate-tag != '' && 'simulated' || secrets.RPM_GPG_PRIVATE_PASSWORD }}
 
       - name: Remove .secrets directory
         if: |
@@ -1298,55 +1330,6 @@ jobs:
         shell: bash
         run: |
           rm -rf .secrets
-
-#  notify:
-#    needs: release
-#    # The platform repos react to a new application release.  A library has
-#    # nothing to deploy, so it is never announced; anything else can opt out.
-#    if: |
-#      needs.release.result == 'success' &&
-#      inputs.release-type != 'library' &&
-#      !inputs.release-notify-skip
-#    name: Release-notification-${{ matrix.platform_repo }}
-#    runs-on: [ubuntu-latest]
-#    permissions:
-#      contents: read
-#    strategy:
-#      matrix:
-#        platform_repo: [xmidt, webpa, nion, anemoi]
-#    env:
-#      PROJECT_NAME: ${{ needs.release.outputs.project_name }}
-#    steps:
-#      - name: Set release version
-#        id: set-version
-#        if: startsWith(github.ref_name, 'v')
-#        shell: bash
-#        run: |
-#          if [[ "${{ github.ref_name }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-#            export RELEASE=$(echo "${{ github.ref_name }}" | sed 's/^v//')
-#            echo "Stripped leading v from tag name."
-#            echo "Before: ${{ github.ref_name }}"
-#            echo "After: $RELEASE"
-#            echo "version=$RELEASE" >> $GITHUB_OUTPUT
-#            echo "valid=true" >> $GITHUB_OUTPUT
-#          else
-#            echo "Tag does not match expected version format (e.g., v1.2.3), skipping"
-#            echo "valid=false" >> $GITHUB_OUTPUT
-#          fi
-#
-#      - name: Notify Platform repo of new release
-#        if: steps.set-version.outputs.valid == 'true'
-#        uses: peter-evans/repository-dispatch@28959ce8df70de7be546dd1250a005dd32156697 # v4.0.1
-#        with:
-#          token: ${{ secrets.REPOSITORY_DISPATCH_TOKEN }}
-#          repository: comcast-cl/${{ matrix.platform_repo }}
-#          event-type: ${{ env.PROJECT_NAME }}-new-release
-#          client-payload: |
-#            {
-#              "app_name": "${{ env.PROJECT_NAME }}",
-#              "repository": "${{ github.repository }}",
-#              "version": "${{ steps.set-version.outputs.version }}"
-#            }
 
   all_passed:
     needs: [ build_program, unit_test, style, golint, license, copyright, release, ymllint ]

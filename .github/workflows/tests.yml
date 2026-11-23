@@ -16,199 +16,63 @@ on:
       - 'library/**'
       - 'program/**'
       - 'README.md'
-    tags:
-      - 'v1.*'
 
   pull_request:
   workflow_dispatch:
 
+# The release job in ci.yml declares these, and a called workflow can't ask
+# for more than its caller grants.  Nothing is pushed or published.
 permissions:
   contents:      write
   pull-requests: read
   packages:      write
 
 jobs:
+  # One job per test directory, each running every check plus a simulated
+  # release (a tag that only exists on the runner; nothing is published).
   command:
     # Normally don't use a workflow without the @{ref}.  In this case, we want
     # to run the workflow specified by the branch instead of what is associated
     # with a reference so we can test that the change works.
     uses: ./.github/workflows/ci.yml
-    if: |
-      startsWith(github.ref, 'refs/tags/') == false
     with:
-      license-skip:         true
-      release-skip-publish: --skip-publish
-      working-directory:    command
-      release-main-package: ./cmd/foo
-      release-type:         program
-      release-docker:       true
-      release-docker-file:  ./cmd/foo/Dockerfile
-      upload-skip:          true
-    secrets: inherit
-
-  command-tag:
-    uses: ./.github/workflows/ci.yml
-    if: |
-      startsWith(github.ref, 'refs/tags/')
-    with:
-      copyright-skip:       true
-      build-skip:           true
-      lint-skip:            true
-      license-skip:         true
-      style-skip:           true
-      #tests-skip:           true
-      release-skip-publish: --skip-publish
-      working-directory:    command
-      release-main-package: ./cmd/foo
-      release-binary-name:  foo
-      release-type:         program
-      release-docker:       true
-      release-docker-file:  ./cmd/foo/Dockerfile
+      working-directory:     command
+      release-simulate-tag:  v1.0.${{ github.run_number }}
+      release-skip-publish:  --skip-publish
+      release-type:          program
+      release-main-package:  ./cmd/foo
+      release-binary-name:   foo
+      release-docker:        true
+      release-docker-file:   ./cmd/foo/Dockerfile
       release-docker-latest: true
       release-docker-major:  true
       release-docker-minor:  true
-      upload-skip:          true
     secrets: inherit
-
 
   program:
     uses: ./.github/workflows/ci.yml
-    if: |
-      startsWith(github.ref, 'refs/tags/') == false
     with:
-      license-skip:          true
-      release-skip-publish:  --skip-publish
       working-directory:     program
+      release-simulate-tag:  v1.0.${{ github.run_number }}
+      release-skip-publish:  --skip-publish
       release-type:          program
+      release-binary-name:   programtest
       release-docker:        true
+      release-docker-latest: true
+      release-docker-major:  true
+      release-docker-minor:  true
       release-docker-extras: |
         main.go
-      upload-skip:          true
-    secrets: inherit
-
-  program-tag:
-    uses: ./.github/workflows/ci.yml
-    if: |
-      startsWith(github.ref, 'refs/tags/')
-    with:
-      copyright-skip:         true
-      build-skip:             true
-      lint-skip:              true
-      license-skip:           true
-      style-skip:             true
-      #tests-skip:             true
-      release-skip-publish:   --skip-publish
-      release-binary-name:    programtest
-      working-directory:      program
-      release-type:           program
-      release-docker:         true
-      release-docker-latest:  true
-      release-docker-major:   true
-      release-docker-minor:   true
-      release-docker-extras:  |
-        main.go
         go.mod
-      upload-skip:          true
+      yaml-lint-skip:        false   # repo-wide, so only once
     secrets: inherit
-
 
   library:
     uses: ./.github/workflows/ci.yml
-    if: |
-      startsWith(github.ref, 'refs/tags/') == false
-    with:
-      license-skip:         true
-      release-skip-publish: --skip-publish
-      working-directory:    library
-      release-type:         library
-      release-project-name: library
-      upload-skip:          true
-    secrets: inherit
-
-  library-tag:
-    uses: ./.github/workflows/ci.yml
-    if: |
-      startsWith(github.ref, 'refs/tags/')
-    with:
-      copyright-skip:       true
-      build-skip:           true
-      lint-skip:            true
-      license-skip:         true
-      style-skip:           true
-      #tests-skip:           true
-      release-skip-publish: --skip-publish
-      working-directory:    library
-      release-type:         library
-      release-project-name: library
-      upload-skip:          true
-    secrets: inherit
-
-
-  slow-things:
-    uses: ./.github/workflows/ci.yml
-    if: |
-      startsWith(github.ref, 'refs/tags/') == false
-    with:
-      working-directory:    program
-      release-type:         program
-      release-project-name: program
-      release-skip-publish: --skip-publish
-      upload-skip:          true
-      yaml-lint-skip:       false
-    secrets: inherit
-
-  slow-things-library:
-    uses: ./.github/workflows/ci.yml
-    if: |
-      startsWith(github.ref, 'refs/tags/') == false
     with:
       working-directory:    library
+      release-simulate-tag: v1.0.${{ github.run_number }}
+      release-skip-publish: --skip-publish
       release-type:         library
       release-project-name: library
-      release-skip-publish: --skip-publish
-      upload-skip:          true
     secrets: inherit
-
-  tag:
-    needs:
-      - command
-      - program
-      - library
-      - slow-things
-      - slow-things-library
-    runs-on: ubuntu-latest
-    if: |
-      always() &&
-      startsWith(github.ref, 'refs/tags/') == false &&
-      needs.command.result                 != 'failure' &&
-      needs.program.result                 != 'failure' &&
-      needs.library.result                 != 'failure' &&
-      needs.slow-things.result             != 'failure' &&
-      needs.slow-things-library.result     != 'failure'
-    steps:
-      - name: Checkout the code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          token: ${{ secrets.PUSH_TAG_TOKEN }}
-
-      - name: Tag for testing the release
-        shell: bash
-        run: |
-          patch=`date +%s`
-          git tag "v1.0.${patch}"
-          git push --tags
-
-  done:
-    needs: [ command-tag, program-tag, library-tag ]
-    runs-on: ubuntu-latest
-    if: |
-      always() &&
-      startsWith(github.ref, 'refs/tags/') == true &&
-      needs.command-tag.result             != 'failure' &&
-      needs.program-tag.result             != 'failure' &&
-      needs.library-tag.result             != 'failure'
-    steps:
-      - name: Test Complete
-        shell: bash
-        run: |
-          echo "Test Complete"
